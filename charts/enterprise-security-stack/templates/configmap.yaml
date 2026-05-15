@@ -1,0 +1,31 @@
+{{- if .Values.configMap.create -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "enterprise-security-stack.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "enterprise-security-stack.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    confirmation:
+      threshold: {{ .Values.config.confirmationThreshold }}
+      window_secs: {{ .Values.config.confirmationWindowSecs }}
+    
+    falco:
+      url: {{ .Values.config.falcoUrl }}
+    
+    guardd:
+      enabled: {{ .Values.config.guarddEnabled }}
+    
+    logging:
+      level: {{ .Values.config.logLevel }}
+      format: {{ .Values.config.logFormat }}
+    
+    limits:
+      max_events_buffer: {{ .Values.config.maxEventsBuffer }}
+  
+  {{- with .Values.configMap.data }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

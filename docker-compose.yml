@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  security-stack:
+    build: .
+    container_name: enterprise-security-stack
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
+      - ADMIN_WEBHOOK_URL=${ADMIN_WEBHOOK_URL:-}
+      - FALCO_URL=http://falco:8765
+      - ML_ENABLED=true
+      - ML_ANOMALY_THRESHOLD=0.7
+      - ML_MODEL_PATH=/data/lstm_model.json
+      - ML_MIN_TRAIN_SAMPLES=100
+      - ML_AUTO_TRAIN_SAMPLES=500
+      - ML_GRAD_CLIP=5.0
+      - API_BIND=0.0.0.0:3000
+      - FALCO_WEBHOOK_BIND=0.0.0.0:8080
+    volumes:
+      - ml-data:/data
+      - /sys/fs/bpf:/sys/fs/bpf:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    cap_add:
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - BPF
+    privileged: true
+    networks:
+      - security-net
+    depends_on:
+      - redis
+      - rabbitmq
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: security-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - security-net
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: security-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=security
+      - RABBITMQ_DEFAULT_PASS=security123
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - security-net
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: security-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - security-net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: security-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - security-net
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+networks:
+  security-net:
+    driver: bridge
+
+volumes:
+  redis-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:
+  ml-data:

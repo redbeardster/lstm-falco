@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+    name: ebpf-seccomp-agent
+    namespace: kube-system
+    labels:
+        app: ebpf-seccomp-agent
+spec:
+    selector:
+        matchLabels:
+            app: ebpf-seccomp-agent
+    template:
+        metadata:
+            labels:
+                app: ebpf-seccomp-agent
+        spec:
+            hostNetwork: true
+            hostPID: true
+            hostIPC: true
+            tolerations:
+                - operator: Exists
+            containers:
+                - name: ebpf-agent
+                  image: seccomp-ebpf-agent:latest
+                  securityContext:
+                      # ИСПРАВЛЕНИЕ: Добавлены дополнительные security constraints
+                      privileged: true  # Требуется для eBPF
+                      # ПРИМЕЧАНИЕ: readOnlyRootFilesystem не используется, т.к. eBPF требует записи в /sys/fs/bpf
+                      # runAsNonRoot не используется, т.к. eBPF требует root привилегий
+                      capabilities:
+                          add:
+                              - BPF           # Для загрузки eBPF программ
+                              - SYS_ADMIN     # Для attach к tracepoints
+                              - SYS_RESOURCE  # Для управления ресурсами eBPF
+                          drop:
+                              - ALL           # Удаляем все остальные capabilities
+                      # Защита от privilege escalation
+                      allowPrivilegeEscalation: false
+                      # SELinux/AppArmor профили (если доступны)
+                      seLinuxOptions:
+                          type: spc_t
+                  env:
+                      - name: NODE_NAME
+                        valueFrom:
+                            fieldRef:
+                                fieldPath: spec.nodeName
+                      - name: HOST_PROC
+                        value: /host/proc
+                      - name: HOST_SYS
+                        value: /host/sys
+                      # ИСПРАВЛЕНИЕ: Добавлены лимиты для предотвращения утечек памяти
+                      - name: MAX_EVENTS_BUFFER
+                        value: "10000"
+                      - name: RUST_LOG
+                        value: "info"
+                  volumeMounts:
+                      - name: host-proc
+                        mountPath: /host/proc
+                        readOnly: true
+                      - name: host-sys
+                        mountPath: /host/sys
+                        readOnly: true
+                      - name: ebpf-maps
+                        mountPath: /sys/fs/bpf
+                  # ИСПРАВЛЕНИЕ: Добавлены более строгие resource limits
+                  resources:
+                      limits:
+                          memory: "512Mi"   # Увеличено для eBPF maps
+                          cpu: "500m"       # Достаточно для обработки событий
+                      requests:
+                          memory: "256Mi"   # Минимум для стабильной работы
+                          cpu: "200m"       # Базовое потребление
+                  # ИСПРАВЛЕНИЕ: Добавлены health checks
+                  livenessProbe:
+                      httpGet:
+                          path: /health
+                          port: 8080
+                      initialDelaySeconds: 30
+                      periodSeconds: 30
+                      timeoutSeconds: 5
+                      failureThreshold: 3
+                  readinessProbe:
+                      httpGet:
+                          path: /ready
+                          port: 8080
+                      initialDelaySeconds: 10
+                      periodSeconds: 10
+                      timeoutSeconds: 3
+                      failureThreshold: 3
+            volumes:
+                - name: host-proc
+                  hostPath:
+                      path: /proc
+                - name: host-sys
+                  hostPath:
+                      path: /sys
+                - name: ebpf-maps
+                  hostPath:
+                      path: /sys/fs/bpf
+                      type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: ebpf-seccomp-config
+    namespace: kube-system
+data:
+    seccomp-policy.yaml: |
+        securityLevel: "high"
+        monitoring:
+          enabled: true
+          alertThresholds:
+            maxDurationNs: 1000000
+            maxFrequencyPerSec: 1000
+        ebpf:
+          programs:
+            - tracepoint/syscalls/sys_enter
+            - tracepoint/syscalls/sys_exit
+            - kprobe/seccomp_check_filter

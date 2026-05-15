@@ -1,0 +1,211 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: guardd-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guardd-config
+  namespace: guardd-system
+data:
+  config.yaml: |
+    # Webhook для отправки событий в наш Security Stack
+    webhook:
+      enabled: true
+      url: "http://enterprise-security-stack.default.svc.cluster.local:8081/guardd-events"
+      timeout: 5s
+      retry: 3
+      batch_size: 10
+      batch_timeout: 1s
+    
+    # Мониторинг файлового доступа
+    file_monitoring:
+      enabled: true
+      paths:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ssh/sshd_config
+        - /root/.ssh
+        - /home/*/.ssh
+        - /var/run/docker.sock
+        - /var/run/crio/crio.sock
+      operations:
+        - read
+        - write
+        - execute
+    
+    # Мониторинг сети
+    network_monitoring:
+      enabled: true
+      suspicious_ports:
+        - 4444  # Metasploit default
+        - 5555  # Android Debug Bridge
+        - 6666  # IRC
+        - 31337 # Back Orifice
+        - 12345 # NetBus
+      suspicious_ips:
+        - 203.0.113.0/24  # TEST-NET-3
+      monitor_dns: true
+      monitor_outbound: true
+    
+    # Мониторинг процессов
+    process_monitoring:
+      enabled: true
+      suspicious_binaries:
+        - nc
+        - ncat
+        - netcat
+        - socat
+        - /bin/sh
+        - /bin/bash
+        - /bin/dash
+        - python
+        - perl
+        - ruby
+        - php
+      suspicious_patterns:
+        - "python -c"
+        - "perl -e"
+        - "bash -i"
+        - "sh -i"
+        - "/dev/tcp"
+        - "base64 -d"
+      monitor_children: true
+    
+    # Linux Capabilities
+    capability_monitoring:
+      enabled: true
+      alert_on:
+        - CAP_SYS_ADMIN
+        - CAP_SYS_PTRACE
+        - CAP_SYS_MODULE
+        - CAP_SYS_RAWIO
+        - CAP_DAC_OVERRIDE
+        - CAP_DAC_READ_SEARCH
+    
+    # Syscall аномалии
+    syscall_monitoring:
+      enabled: true
+      suspicious_syscalls:
+        - ptrace
+        - process_vm_readv
+        - process_vm_writev
+        - kexec_load
+        - kexec_file_load
+        - mount
+        - umount2
+        - reboot
+    
+    # Логирование
+    logging:
+      level: info
+      format: json
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: guardd
+  namespace: guardd-system
+  labels:
+    app: guardd
+spec:
+  selector:
+    matchLabels:
+      app: guardd
+  template:
+    metadata:
+      labels:
+        app: guardd
+    spec:
+      serviceAccountName: guardd
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: guardd
+          image: guardd:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_RESOURCE
+                - SYS_PTRACE
+                - NET_ADMIN
+                - BPF
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: HOST_PROC
+              value: /host/proc
+            - name: HOST_SYS
+              value: /host/sys
+          volumeMounts:
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: host-sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: ebpf-maps
+              mountPath: /sys/fs/bpf
+            - name: config
+              mountPath: /etc/guardd
+          resources:
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc
+        - name: host-sys
+          hostPath:
+            path: /sys
+        - name: ebpf-maps
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: guardd-config
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: guardd
+  namespace: guardd-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: guardd
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardd
+subjects:
+  - kind: ServiceAccount
+    name: guardd
+    namespace: guardd-system

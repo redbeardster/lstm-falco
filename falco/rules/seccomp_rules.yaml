@@ -1,0 +1,48 @@
+- rule: Поле с нестандартными символами во вложенном поле
+  desc: Правило с точкой в имени поля
+  condition: evt.type = execve and proc.name = "evil"
+  output: "Точка в поле %proc.name.extra and %proc.name"
+  priority: CRITICAL
+  tags: [test]
+
+- rule: Правило с очень длинной строкой (>10К символов)
+  desc: Проверка на переполнение буфера
+  condition: evt.type = execve and proc.name = "very_very_very_loooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong_name"
+  output: "Очень длинное сообщение с кучей лишнего текста, которое может переполнить буфер, если его неправильно обрабатывать %proc.name"
+  priority: WARNING
+  tags: [test]
+
+- rule: Правило с экранированными символами
+  desc: Правило с \n и \t в строке
+  condition: evt.type = execve and proc.name = "evil\n\t\\"
+  output: "Символы экранирования: %proc.name\nnewline"
+  priority: WARNING
+  tags: [test]
+
+- rule: Правило с UTF-8 и специальными символами
+  desc: Правило с эмодзи и спецсимволами
+  condition: evt.type = execve and proc.name = "😈"
+  output: "UTF-8 тест: %proc.name ✓ → 🚀"
+  priority: INFO
+  tags: [test]
+
+- rule: Правило, которое ссылается на несуществующее поле
+  desc: Это вызовет ошибку, если код валидирует поля на лету
+  condition: evt.never_happens = 1
+  output: "Несуществующее поле %evt.never_happens"
+  priority: DEBUG
+  tags: [test]
+
+- rule: Правило снарушенной структурой (нет обязательных полей)
+  desc: Правило без output
+  condition: evt.type = execve
+  output: "Wrong structure"
+  priority: EMERGENCY
+  tags: [test]
+
+- rule: Правило с рекурсивным макросом (если макросы поддерживаются)
+  desc: Макрос вызывает сам себя
+  condition: recursive_macro and recursive_macro
+  output: "Рекурсия"
+  priority: ERROR
+  tags: [test]

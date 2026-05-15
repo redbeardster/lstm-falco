@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: falco
+spec:
+  selector:
+    matchLabels:
+      app: falco
+  template:
+    metadata:
+      labels:
+        app: falco
+    spec:
+      serviceAccountName: falco
+      hostPID: true
+      hostNetwork: true
+      containers:
+      - name: falco
+        image: falcosecurity/falco:latest
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+              - SYS_ADMIN
+              - SYS_RESOURCE
+              - SYS_PTRACE
+              - NET_ADMIN
+              - BPF
+        env:
+        - name: FALCO_BPF_PROBE
+          value: ""
+        volumeMounts:
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: host-boot
+          mountPath: /host/boot
+          readOnly: true
+        - name: host-lib-modules
+          mountPath: /lib/modules
+          readOnly: true
+        - name: host-usr-src
+          mountPath: /usr/src
+          readOnly: true
+        - name: falco-config
+          mountPath: /etc/falco
+        - name: falco-rules
+          mountPath: /etc/falco/rules.d
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+        - name: ebpf-maps
+          mountPath: /sys/fs/bpf
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+      volumes:
+      - name: host-proc
+        hostPath:
+          path: /proc
+      - name: host-boot
+        hostPath:
+          path: /boot
+      - name: host-lib-modules
+        hostPath:
+          path: /lib/modules
+      - name: host-usr-src
+        hostPath:
+          path: /usr/src
+      - name: falco-config
+        configMap:
+          name: falco-config
+      - name: falco-rules
+        configMap:
+          name: falco-rules
+      - name: docker-socket
+        hostPath:
+          path: /var/run/docker.sock
+      - name: ebpf-maps
+        hostPath:
+          path: /sys/fs/bpf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: falco
+  namespace: falco
+spec:
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: webhook
+  - port: 8765
+    targetPort: 8765
+    name: grpc
+  selector:
+    app: falco

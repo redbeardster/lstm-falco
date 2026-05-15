@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: security-stack
+  namespace: security-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: security-stack
+rules:
+  # Чтение подов для мониторинга
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Управление подами для изоляции
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["patch", "update"]
+  # Чтение событий
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Чтение namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  # Управление NetworkPolicies для изоляции
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: security-stack
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: security-stack
+subjects:
+  - kind: ServiceAccount
+    name: security-stack
+    namespace: security-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: security-stack-config
+  namespace: security-system
+data:
+  RUST_LOG: "enterprise_security=info,falco=info,guardd=info"
+  EBPF_PROGRAM_PATH: "/opt/seccomp/ebpf/seccomp_monitor.o"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security-stack
+  namespace: security-system
+  labels:
+    app: security-stack
+    component: main
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: security-stack
+      component: main
+  template:
+    metadata:
+      labels:
+        app: security-stack
+        component: main
+    spec:
+      serviceAccountName: security-stack
+      hostNetwork: true
+      hostPID: true
+      containers:
+        - name: security-stack
+          image: enterprise-security-stack:latest
+          imagePullPolicy: Never  # Используем локальный образ
+          securityContext:
+            privileged: true  # Требуется для eBPF
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_RESOURCE
+                - NET_ADMIN
+          envFrom:
+            - configMapRef:
+                name: security-stack-config
+          ports:
+            - name: api
+              containerPort: 3000
+              protocol: TCP
+            - name: falco-webhook
+              containerPort: 8080
+              protocol: TCP
+            - name: guardd-webhook
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: proc
+          hostPath:
+            path: /proc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: security-stack
+  namespace: security-system
+  labels:
+    app: security-stack
+spec:
+  type: ClusterIP
+  selector:
+    app: security-stack
+    component: main
+  ports:
+    - name: api
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+    - name: falco-webhook
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: guardd-webhook
+      port: 8081
+      targetPort: 8081
+      protocol: TCP

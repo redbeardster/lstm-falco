@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "enterprise-security-stack.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "enterprise-security-stack.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "enterprise-security-stack.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "enterprise-security-stack.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "enterprise-security-stack.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: {{ .Chart.Name }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.service.targetPort }}
+          protocol: TCP
+        env:
+        - name: RUST_LOG
+          value: {{ .Values.config.logLevel | quote }}
+        - name: FALCO_URL
+          value: {{ .Values.config.falcoUrl | quote }}
+        - name: MAX_EVENTS_BUFFER
+          value: {{ .Values.config.maxEventsBuffer | quote }}
+        - name: CONFIRMATION_THRESHOLD
+          value: {{ .Values.config.confirmationThreshold | quote }}
+        - name: CONFIRMATION_WINDOW_SECS
+          value: {{ .Values.config.confirmationWindowSecs | quote }}
+        - name: ML_ENABLED
+          value: {{ .Values.config.ml.enabled | quote }}
+        - name: ML_ANOMALY_THRESHOLD
+          value: {{ .Values.config.ml.anomalyThreshold | quote }}
+        - name: ML_MODEL_PATH
+          value: {{ .Values.config.ml.modelPath | quote }}
+        - name: ML_MIN_TRAIN_SAMPLES
+          value: {{ .Values.config.ml.minTrainSamples | quote }}
+        - name: ML_AUTO_TRAIN_SAMPLES
+          value: {{ .Values.config.ml.autoTrainSamples | quote }}
+        - name: ML_WINDOW_SIZE
+          value: {{ .Values.config.ml.windowSize | quote }}
+        - name: ML_HIDDEN_SIZE
+          value: {{ .Values.config.ml.hiddenSize | quote }}
+        - name: FALCO_WEBHOOK_BIND
+          value: {{ .Values.config.ml.falcoWebhookBind | quote }}
+        - name: ML_GRAD_CLIP
+          value: {{ .Values.config.ml.gradClip | quote }}
+        - name: API_BIND
+          value: "0.0.0.0:{{ .Values.service.targetPort }}"
+        livenessProbe:
+          {{- toYaml .Values.livenessProbe | nindent 12 }}
+        readinessProbe:
+          {{- toYaml .Values.readinessProbe | nindent 12 }}
+        resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+        volumeMounts:
+        {{- if .Values.persistence.enabled }}
+        - name: audit-logs
+          mountPath: {{ .Values.persistence.mountPath }}
+        {{- end }}
+        - name: ml-data
+          mountPath: /data
+      volumes:
+      {{- if .Values.persistence.enabled }}
+      - name: audit-logs
+        persistentVolumeClaim:
+          claimName: {{ include "enterprise-security-stack.fullname" . }}-audit
+      {{- end }}
+      - name: ml-data
+        emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

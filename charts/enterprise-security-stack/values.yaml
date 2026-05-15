@@ -1,0 +1,182 @@
+# Default values for enterprise-security-stack
+
+# Image configuration
+image:
+  repository: 192.168.0.7:5000/security-stack
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Deployment configuration
+replicaCount: 1
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 3000
+  targetPort: 3000
+  annotations: {}
+
+# NodePort configuration (for external access)
+nodePort:
+  enabled: true
+  apiPort: 30000
+  falcoPort: 30080
+  guarddPort: 30081
+
+# Resource limits
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+# Security context
+securityContext:
+  privileged: false
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 1000
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Probes
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 3000
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Configuration
+config:
+  # Confirmation mechanism for false positive protection
+  confirmationThreshold: 3  # Number of confirmations before action
+  confirmationWindowSecs: 60  # Time window for confirmations
+  
+  # Falco integration
+  falcoUrl: "http://falco.falco:8765"
+  
+  # Guardd integration
+  guarddEnabled: true
+  
+  # Logging
+  logLevel: "info"
+  logFormat: "json"
+  
+  # Max events buffer
+  maxEventsBuffer: 10000
+
+  # LSTM / ML (Falco anomaly detection)
+  ml:
+    enabled: true
+    anomalyThreshold: "0.7"
+    modelPath: "/data/lstm_model.json"
+    minTrainSamples: "100"
+    autoTrainSamples: "500"
+    windowSize: "20"
+    hiddenSize: "32"
+    falcoWebhookBind: "0.0.0.0:8080"
+    gradClip: "5.0"
+
+# ServiceAccount
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# RBAC
+rbac:
+  create: true
+
+# ConfigMap for additional configuration
+configMap:
+  create: true
+  data: {}
+
+# Persistence for audit logs
+persistence:
+  enabled: false
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  mountPath: /var/log/security-audit
+
+# Metrics
+metrics:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+
+# Ingress
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: security-stack.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# eBPF DaemonSet (optional)
+ebpf:
+  enabled: false
+  image:
+    repository: 192.168.0.7:5000/ebpf-agent
+    tag: "latest"
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+# Falco integration (if not already installed)
+falco:
+  enabled: false
+  # Use existing Falco installation
+  existingInstallation: true
+
+# Network policies
+networkPolicy:
+  enabled: false
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []

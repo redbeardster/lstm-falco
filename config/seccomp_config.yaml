@@ -1,0 +1,62 @@
+# Конфигурация seccomp политик
+seccomp:
+    # Основной уровень безопасности
+    default_level: "high"
+
+    # Динамические правила
+    dynamic_rules:
+        enabled: true
+        # Время жизни временных правил (секунды)
+        temp_rule_ttl: 300
+
+        # Правила, применяемые при обнаружении угроз
+        threat_response:
+            reverse_shell:
+                - block_syscalls: ["execve", "fork", "clone", "ptrace"]
+                  duration: 600
+                  priority: "critical"
+
+            crypto_miner:
+                - block_syscalls: ["execve", "fork"]
+                  duration: 3600
+                  priority: "high"
+
+            lateral_movement:
+                - block_syscalls: ["execve", "connect", "accept"]
+                  duration: 900
+                  priority: "high"
+
+            container_escape:
+                - block_syscalls: ["mount", "umount", "pivot_root"]
+                  duration: 1800
+                  priority: "critical"
+
+            ml_anomaly:
+                - block_syscalls: ["execve", "clone", "ptrace"]
+                  duration: 300
+                  priority: "warning"
+                  threshold_score: 3.5
+
+    # Разрешенные syscall'ы по уровням
+    security_levels:
+        low:
+            - read, write, close, exit, exit_group, getpid, gettid
+            - mmap, munmap, brk, mprotect, rt_sigaction
+
+        medium:
+            - all from low
+            - openat, fstat, lseek, futex, clone
+
+        high:
+            - all from medium
+            - socket, connect, accept, bind, listen
+
+        paranoid:
+            - read, write, exit_group # Минимальный набор
+
+    # Исключения для конкретных приложений (allowlist)
+    exceptions:
+        - app: "chrome"
+          allowed: ["read", "write", "connect", "accept"]
+        - app: "postgres"
+          allowed: ["accept", "recvfrom", "sendto"]
