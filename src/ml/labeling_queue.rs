@@ -76,14 +76,26 @@ pub struct TrainingLabelDecision {
     pub skip_collector: bool,
 }
 
+/// Score in the "gray zone" — only these go to the analyst queue (saves review time).
+pub fn is_uncertain_score(score: f64, low: f64, high: f64) -> bool {
+    score > low && score < high
+}
+
+pub fn should_enqueue_for_analyst(
+    queue_enabled: bool,
+    score: f64,
+    low: f64,
+    high: f64,
+) -> bool {
+    queue_enabled && is_uncertain_score(score, low, high)
+}
+
 pub fn resolve_training_label(
     score: f64,
     event: &FalcoEvent,
     store: &LabelStore,
     active_learning: &ActiveLearningConfig,
-    queue_uncertain: bool,
-    queue_all_alerts: bool,
-    alert_threshold: f64,
+    queue_enabled: bool,
 ) -> TrainingLabelDecision {
     let manual = label_event(event, store);
     if manual.source == LabelSource::Manual {
@@ -92,6 +104,20 @@ pub fn resolve_training_label(
             source: LabelSource::Manual,
             enqueue_for_analyst: false,
             skip_collector: false,
+        };
+    }
+
+    let low = active_learning.low_confidence;
+    let high = active_learning.high_confidence;
+    let needs_analyst = should_enqueue_for_analyst(queue_enabled, score, low, high);
+
+    // Uncertain: no proxy label in the training buffer — wait for analyst ground truth.
+    if needs_analyst {
+        return TrainingLabelDecision {
+            label: manual.label,
+            source: manual.source,
+            enqueue_for_analyst: true,
+            skip_collector: true,
         };
     }
 
@@ -108,21 +134,12 @@ pub fn resolve_training_label(
             enqueue_for_analyst: false,
             skip_collector: false,
         },
-        ActiveLearningBand::Uncertain => TrainingLabelDecision {
+        ActiveLearningBand::Uncertain | ActiveLearningBand::UseProxy => TrainingLabelDecision {
             label: manual.label,
             source: manual.source,
-            enqueue_for_analyst: queue_uncertain,
-            skip_collector: queue_uncertain,
+            enqueue_for_analyst: false,
+            skip_collector: false,
         },
-        ActiveLearningBand::UseProxy => {
-            let enqueue = queue_all_alerts && score > alert_threshold;
-            TrainingLabelDecision {
-                label: manual.label,
-                source: manual.source,
-                enqueue_for_analyst: enqueue,
-                skip_collector: false,
-            }
-        }
     }
 }
 
@@ -260,6 +277,52 @@ pub type SharedLabelingQueue = Arc<LabelingQueue>;
 
 pub fn shared_labeling_queue(path: PathBuf, max_pending: usize) -> SharedLabelingQueue {
     Arc::new(LabelingQueue::new(path, max_pending))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ml::event_labeling::LabelStore;
+
+    #[test]
+    fn uncertain_band_excludes_edges() {
+        assert!(!is_uncertain_score(0.3, 0.3, 0.9));
+        assert!(is_uncertain_score(0.31, 0.3, 0.9));
+        assert!(is_uncertain_score(0.7, 0.3, 0.9));
+        assert!(!is_uncertain_score(0.9, 0.3, 0.9));
+        assert!(!is_uncertain_score(0.95, 0.3, 0.9));
+    }
+
+    #[test]
+    fn uncertain_score_queues_without_collector_proxy() {
+        let store = LabelStore::load(std::path::Path::new("/nonexistent"));
+        let al = ActiveLearningConfig {
+            enabled: true,
+            low_confidence: 0.3,
+            high_confidence: 0.9,
+        };
+        let event = FalcoEvent {
+            time: chrono::Utc::now(),
+            rule: "Test rule".to_string(),
+            priority: "Critical".to_string(),
+            output: "test".to_string(),
+            source: None,
+            tags: None,
+            output_fields: None,
+            hostname: None,
+            container_id: None,
+            process_pid: None,
+            syscall: None,
+        };
+        let d = resolve_training_label(0.55, &event, &store, &al, true);
+        assert!(d.enqueue_for_analyst);
+        assert!(d.skip_collector);
+
+        let d_high = resolve_training_label(0.95, &event, &store, &al, true);
+        assert!(!d_high.enqueue_for_analyst);
+        assert!(!d_high.skip_collector);
+        assert_eq!(d_high.label, 1.0);
+    }
 }
 
 pub fn records_to_training_data(records: &[LabeledAnomalyRecord]) -> LoadedTrainingData {

@@ -29,17 +29,23 @@ If you still see `self.lstm_detector` or `time_window_detector.rs`, you are on a
 | eBPF | `ebpf_zscore_detector` | Syscall duration z-score |
 | Composite API | `heuristic_threat_detector` | Weighted severity heuristic (not neural net) |
 
-## Real-time labeling (reviewer note #3)
+## Labeling and analyst queue
 
-Training labels in the live collector are **not** `Critical → 1.0` only.
+**Подробная документация:** [LABELING_WORKFLOW.md](./LABELING_WORKFLOW.md) (поток событий, таблицы по score, API, anti-patterns).
 
-Priority in `falco_integration.rs` is assigned via `ml::event_labeling::label_event`:
+Кратко:
 
-1. **Manual** — `data/labels.json` (`ML_LABELS_PATH`), updatable via `POST /api/ml/labels`
-2. **Rule heuristics** — attack/noise rule name patterns and tags
-3. **Priority fallback** — `Critical` / `Alert` / `Emergency` / `Error` → 1.0
+- В очередь `/api/ml/pending` попадают **только** uncertain: `ML_AL_LOW < score < ML_AL_HIGH` (default 0.3–0.9).
+- Пока событие в очереди, **proxy-метка не пишется** в collector (`skip_collector`).
+- `ML_ANOMALY_THRESHOLD` (0.7) управляет **автоответом**, не составом очереди.
+- Ground truth: `POST /api/ml/label` → `data/labeled_anomalies.json`.
 
-Priority labels remain **proxies**, not confirmed incidents. For field-quality training, maintain manual rule labels and/or bootstrap from curated `training_data.json`.
+Training labels в collector (когда не ждём аналитика):
+
+1. **Analyst** — после `POST /api/ml/label`
+2. **Manual** — `ML_LABELS_PATH`
+3. **Active learning** — score ≤ 0.3 или ≥ 0.9
+4. **Rule / priority** — proxy only
 
 ## Module layout (reviewer note #4)
 

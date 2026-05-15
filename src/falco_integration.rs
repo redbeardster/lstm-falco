@@ -114,8 +114,6 @@ impl FalcoEventHandler {
             &store,
             &active_learning,
             self.ml_config.labeling_queue_enabled,
-            self.ml_config.labeling_queue_enabled && !self.ml_config.active_learning_enabled,
-            self.ml_config.anomaly_threshold,
         );
         drop(store);
 
@@ -126,15 +124,8 @@ impl FalcoEventHandler {
         }
 
         if decision.enqueue_for_analyst {
-            let reason = if active_learning.enabled && score > self.ml_config.active_learning_low
-                && score < self.ml_config.active_learning_high
-            {
-                "uncertain_score"
-            } else {
-                "high_anomaly_score"
-            };
             self.labeling_queue
-                .enqueue(event, score, reason)
+                .enqueue(event, score, "uncertain_score")
                 .await;
         }
 

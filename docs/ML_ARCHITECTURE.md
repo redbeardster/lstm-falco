@@ -13,9 +13,15 @@ This stack uses **three independent detection paths**. Only the Falco webhook pa
 ## Falco LSTM pipeline
 
 1. Webhook receives `FalcoEvent`.
-2. `ml::event_labeling::label_event` assigns a proxy label (**manual** → **rule heuristic** → **priority**). This replaces the old `if priority == "Critical" { 1.0 }` shortcut.
-3. `DataCollector` stores events; every `ML_AUTO_TRAIN_SAMPLES` (default 500) triggers auto-train.
-4. `RealtimeLSTM` scores each event; score above `ML_ANOMALY_THRESHOLD` triggers automated response.
+2. `RealtimeLSTM::process_event` returns LSTM `score` (single head, no z-score blend on this path).
+3. `ml::labeling_queue::resolve_training_label` decides collector vs analyst queue (see [LABELING_WORKFLOW.md](./LABELING_WORKFLOW.md)):
+   - **Uncertain band** (`ML_AL_LOW` < score < `ML_AL_HIGH`): pending queue only, **no** proxy label in collector.
+   - **High confidence** (active learning): auto `1.0` / `0.0` in collector.
+   - **Otherwise**: proxy cascade in `event_labeling` (manual → rule → priority).
+4. `DataCollector` accumulates labeled steps; every `ML_AUTO_TRAIN_SAMPLES` (default 500) triggers auto-train.
+5. If `score > ML_ANOMALY_THRESHOLD` and the event was **not** queued for analyst → `AutomatedResponseEngine`.
+
+**Not used anymore:** `if priority == "Critical" { 1.0 }` as the only label; queueing all alerts with `score > 0.7`; hybrid `combined_score`.
 
 ## Data files
 
@@ -27,6 +33,7 @@ This stack uses **three independent detection paths**. Only the Falco webhook pa
 | `data/labels.json` | `ML_LABELS_PATH` | `[{ "rule": "Rule Name", "label": 0.0\|1.0 }]` manual overrides |
 | `data/training_metrics.json` | (fixed path in `main`) | Training run metrics + label source breakdown |
 | `data/training_history.json` | (fixed path) | Training run history |
+| `data/labeled_anomalies.json` | `ML_LABELED_ANOMALIES_PATH` | Analyst-confirmed samples (`POST /api/ml/label`) |
 
 Legacy `"features"` key in `training_data.json` is accepted if the vector length is 8.
 
@@ -52,9 +59,18 @@ Legacy `"features"` key in `training_data.json` is accepted if the vector length
 
 ## Environment variables
 
-- `ML_BOOTSTRAP_TRAIN=true` — on startup, train from `training_data.json` if model missing or `ML_FORCE_RETRAIN=true`.
-- `ML_FORCE_RETRAIN=true` — bootstrap overwrites existing `lstm_model.json`.
-- See `src/ml/ml_config.rs` for window size, learning rate, thresholds, and paths.
+| Variable | Default | Role |
+|----------|---------|------|
+| `ML_ANOMALY_THRESHOLD` | `0.7` | Automated **response** threshold (not the analyst queue) |
+| `ML_AL_LOW_CONFIDENCE` | `0.3` | Lower bound of uncertain band (exclusive) |
+| `ML_AL_HIGH_CONFIDENCE` | `0.9` | Upper bound of uncertain band (exclusive) |
+| `ML_ACTIVE_LEARNING` | `true` | Auto-label confident scores in collector |
+| `ML_LABELING_QUEUE` | `true` | Enable analyst queue for uncertain scores only |
+| `ML_AUTO_RESPONSE_ON_ANOMALY` | `true` | Skip response while event is in pending queue |
+| `ML_BOOTSTRAP_TRAIN` | `false` | Train from `training_data.json` on startup if no model |
+| `ML_FORCE_RETRAIN` | `false` | Bootstrap overwrites existing model |
+
+Full labeling semantics: [LABELING_WORKFLOW.md](./LABELING_WORKFLOW.md). All keys: `src/ml/ml_config.rs`.
 
 ## Module layout
 
@@ -62,16 +78,11 @@ All ML modules are under `src/ml/` (see `src/ml/mod.rs`). Integration with Falco
 
 Status summary: [PROJECT_STATUS.md](./PROJECT_STATUS.md).
 
-## Labeling note
+## Labeling (summary)
 
-Training labels use a **cascade** (see [LABELING_WORKFLOW.md](./LABELING_WORKFLOW.md)):
+Detailed flow, anti-patterns, and score tables: **[LABELING_WORKFLOW.md](./LABELING_WORKFLOW.md)**.
 
-1. Analyst (`analyst`) — ground truth from `POST /api/ml/label`
-2. Manual rules file (`manual`) — `ML_LABELS_PATH`
-3. Active learning (`active_learning`) — auto 0/1 when score ≤0.3 or ≥0.9
-4. Rule / priority heuristics — proxy only
-
-Uncertain scores (0.3–0.9) skip auto-training until an analyst labels them.
+Short version: only `ML_AL_LOW < score < ML_AL_HIGH` goes to `/api/ml/pending` without a proxy label in the training buffer. Analyst labels become ground truth in `labeled_anomalies.json`.
 
 ## Examples
 
