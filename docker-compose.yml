@@ -15,6 +15,10 @@ services:
       - ML_ENABLED=true
       - ML_ANOMALY_THRESHOLD=0.7
       - ML_MODEL_PATH=/data/lstm_model.json
+      - ML_TRAINING_DATA_PATH=/data/training_data.json
+      - ML_COLLECTOR_PATH=/data/lstm_training.json
+      - ML_LABELS_PATH=/data/labels.json
+      - ML_BOOTSTRAP_TRAIN=false
       - ML_MIN_TRAIN_SAMPLES=100
       - ML_AUTO_TRAIN_SAMPLES=500
       - ML_GRAD_CLIP=5.0

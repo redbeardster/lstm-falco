@@ -10,7 +10,10 @@ pub struct MlConfig {
     pub anomaly_threshold: f64,
     pub model_path: PathBuf,
     pub training_data_path: PathBuf,
+    pub labels_path: PathBuf,
     pub collector_path: PathBuf,
+    pub bootstrap_train: bool,
+    pub force_retrain: bool,
     pub window_size: usize,
     pub step_size: usize,
     pub hidden_size: usize,
@@ -34,6 +37,7 @@ impl MlConfig {
                 "ML_TRAINING_DATA_PATH",
                 "data/training_data.json",
             )),
+            labels_path: PathBuf::from(env_str("ML_LABELS_PATH", "data/labels.json")),
             collector_path: PathBuf::from(env_str(
                 "ML_COLLECTOR_PATH",
                 "data/lstm_training.json",
@@ -47,6 +51,8 @@ impl MlConfig {
             min_train_samples: env_usize("ML_MIN_TRAIN_SAMPLES", 100)?,
             auto_train_samples: env_usize("ML_AUTO_TRAIN_SAMPLES", 500)?,
             max_collector_samples: env_usize("ML_MAX_COLLECTOR_SAMPLES", 10_000)?,
+            bootstrap_train: env_bool("ML_BOOTSTRAP_TRAIN", false),
+            force_retrain: env_bool("ML_FORCE_RETRAIN", false),
             falco_webhook_bind: env_str("FALCO_WEBHOOK_BIND", "0.0.0.0:8080"),
             api_bind: env_str("API_BIND", "0.0.0.0:3000"),
         };
@@ -58,6 +64,7 @@ impl MlConfig {
         for path in [
             &self.model_path,
             &self.training_data_path,
+            &self.labels_path,
             &self.collector_path,
         ] {
             if let Some(parent) = path.parent() {
@@ -93,8 +100,8 @@ impl MlConfig {
         Ok(())
     }
 
-    pub fn to_lstm_config(&self) -> crate::time_window_detector::RealtimeLSTMConfig {
-        crate::time_window_detector::RealtimeLSTMConfig {
+    pub fn to_lstm_config(&self) -> crate::realtime_lstm::RealtimeLSTMConfig {
+        crate::realtime_lstm::RealtimeLSTMConfig {
             window_size: self.window_size,
             step_size: self.step_size,
             threshold: self.anomaly_threshold,

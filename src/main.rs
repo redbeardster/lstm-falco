@@ -16,7 +16,11 @@ mod lstm_online;
 mod sequence_features;
 mod training_metrics;
 mod training_history;
-mod time_window_detector;
+mod ebpf_zscore_detector;
+mod event_labeling;
+mod falco_timestep;
+mod realtime_lstm;
+mod training_data;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -55,9 +59,15 @@ use automated_response::AutomatedResponseEngine;
 use seccomp_enhanced::{EnhancedSecuritySystem, SecurityLevel};
 use guardd_integration::GuarddIntegration;
 use threat_detector::CompositeDetector;
-use detectors::{falco_detector::FalcoDetector, guardd_detector::GuarddDetector, ml_detector::MLDetector};
+use detectors::{
+    falco_detector::FalcoDetector,
+    guardd_detector::GuarddDetector,
+    heuristic_threat_detector::HeuristicThreatDetector,
+};
+use event_labeling::shared_label_store;
 use ml_config::MlConfig;
-use time_window_detector::RealtimeLSTM;
+use realtime_lstm::RealtimeLSTM;
+use training_data::load_training_data_file;
 use training_history::{TrainingHistoryStore, TrainingSource};
 
 #[derive(Debug, Deserialize)]
@@ -149,7 +159,7 @@ struct AppState {
 fn record_training_run(
     history: &Arc<Mutex<TrainingHistoryStore>>,
     source: TrainingSource,
-    result: &time_window_detector::TrainingResult,
+    result: &realtime_lstm::TrainingResult,
     step_samples: usize,
     anomaly_labels: usize,
     model_path: &str,
@@ -163,6 +173,92 @@ fn record_training_run(
         model_path,
         started.elapsed(),
     )
+}
+
+async fn bootstrap_train_from_file(
+    ml_config: &MlConfig,
+    realtime_lstm: Arc<RealtimeLSTM>,
+    training_history: &Arc<Mutex<TrainingHistoryStore>>,
+) -> anyhow::Result<()> {
+    let data_path = &ml_config.training_data_path;
+    if !data_path.exists() {
+        anyhow::bail!("training data not found at {:?}", data_path);
+    }
+
+    let model_exists = ml_config.model_path.exists();
+    if model_exists && !ml_config.force_retrain {
+        info!(
+            "Bootstrap skipped: model exists at {:?} (set ML_FORCE_RETRAIN=true to override)",
+            ml_config.model_path
+        );
+        return Ok(());
+    }
+
+    let loaded = load_training_data_file(data_path.as_path())?;
+    if loaded.timesteps.len() < ml_config.min_train_samples {
+        anyhow::bail!(
+            "bootstrap needs >= {} samples, got {}",
+            ml_config.min_train_samples,
+            loaded.timesteps.len()
+        );
+    }
+
+    let anomaly_count = loaded.labels.iter().filter(|&&l| l > 0.5).count();
+    info!(
+        "Bootstrap LSTM training from {:?}: {} samples ({} anomalies)",
+        data_path,
+        loaded.timesteps.len(),
+        anomaly_count
+    );
+
+    let model_path = ml_config.model_path.to_string_lossy().into_owned();
+    let started = std::time::Instant::now();
+    let result = realtime_lstm
+        .train_from_data(&loaded.timesteps, &loaded.labels)
+        .await;
+
+    record_training_run(
+        training_history,
+        TrainingSource::TrainReal,
+        &result,
+        loaded.timesteps.len(),
+        anomaly_count,
+        &model_path,
+        started,
+    );
+
+    if !result.model_saved {
+        anyhow::bail!("bootstrap training did not persist model");
+    }
+
+    Ok(())
+}
+
+async fn record_training_metrics(
+    collector: &Arc<data_collector::DataCollector>,
+    metrics_store: &Arc<Mutex<TrainingMetricsCollector>>,
+    result: &realtime_lstm::TrainingResult,
+    step_samples: usize,
+    anomaly_labels: usize,
+) {
+    use crate::training_metrics::TrainingMetrics;
+
+    let stats = collector.label_stats_snapshot().await;
+    let metrics = TrainingMetrics {
+        timestamp: chrono::Utc::now(),
+        total_samples: step_samples,
+        normal_samples: step_samples.saturating_sub(anomaly_labels),
+        anomaly_samples: anomaly_labels,
+        training_loss: result.loss,
+        validation_accuracy: result.accuracy,
+        precision: result.accuracy,
+        recall: result.f1_score,
+        f1_score: result.f1_score,
+        false_positive_rate: 0.0,
+        false_negative_rate: 0.0,
+        label_sources: Some(stats.to_json()),
+    };
+    metrics_store.lock().unwrap().record_training(metrics);
 }
 
 #[derive(Serialize)]
@@ -252,8 +348,23 @@ async fn main() -> Result<()> {
         &ml_config.collector_path.to_string_lossy(),
         ml_config.max_collector_samples,
     ));
+    data_collector.try_load_from_json().await;
+
+    let label_store = shared_label_store(ml_config.labels_path.clone());
 
     let model_path = ml_config.model_path.to_string_lossy().into_owned();
+    if ml_config.bootstrap_train {
+        if let Err(e) = bootstrap_train_from_file(
+            &ml_config,
+            realtime_lstm.clone(),
+            &training_history,
+        )
+        .await
+        {
+            error!("Bootstrap training skipped: {e:#}");
+        }
+    }
+
     let falco = Arc::new(
         FalcoIntegration::new(
             response_engine.clone(),
@@ -264,6 +375,7 @@ async fn main() -> Result<()> {
             ml_config.falco_webhook_bind.clone(),
             ml_config.window_size,
             model_path,
+            label_store,
         )
         .await?,
     );
@@ -275,7 +387,7 @@ async fn main() -> Result<()> {
     let mut composite_detector = CompositeDetector::new();
     composite_detector.add_detector(Box::new(FalcoDetector::new()));
     composite_detector.add_detector(Box::new(GuarddDetector::new()));
-    composite_detector.add_detector(Box::new(MLDetector::new()));
+    composite_detector.add_detector(Box::new(HeuristicThreatDetector::new()));
     let composite_detector = Arc::new(composite_detector);
 
     // 8. Создаем менеджер seccomp
@@ -723,7 +835,18 @@ async fn trigger_training(State(state): State<AppState>) -> Json<serde_json::Val
             .data_collector
             .retain_tail(state.ml_config.window_size * 2)
             .await;
+        if let Err(e) = state.data_collector.save_to_json().await {
+            error!("Failed to persist collector after API train: {e:#}");
+        }
     }
+    record_training_metrics(
+        &state.data_collector,
+        &state.training_metrics,
+        &result,
+        features.len(),
+        anomaly_count,
+    )
+    .await;
     Json(json!({
         "status": if result.model_saved { "training_completed" } else { "training_failed" },
         "samples": features.len(),
@@ -796,63 +919,54 @@ async fn test_model(State(state): State<AppState>, Json(payload): Json<Vec<Vec<f
 }
 
 async fn train_on_real_data(State(state): State<AppState>) -> Json<serde_json::Value> {
-    use std::fs;
-
     info!("📊 Loading real training data...");
 
-    let data_path = state.ml_config.training_data_path.to_string_lossy().to_string();
-    let content = match fs::read_to_string(data_path) {
-        Ok(c) => c,
-        Err(_) => {
-            return Json(json!({
-                "status": "error",
-                "message": "No training data found. Run: cargo run --example training_scenarios"
-            }));
-        }
-    };
-
-    let samples: Vec<serde_json::Value> = match serde_json::from_str(&content) {
-        Ok(data) => data,
+    let data_path = state.ml_config.training_data_path.clone();
+    let loaded = match load_training_data_file(data_path.as_path()) {
+        Ok(d) => d,
         Err(e) => {
             return Json(json!({
                 "status": "error",
-                "message": format!("Failed to parse training data: {}", e)
+                "message": format!(
+                    "Failed to load training data from {:?}: {}. Run: cargo run --example training_scenarios",
+                    data_path, e
+                )
             }));
         }
     };
 
-    let mut features = Vec::new();
-    let mut labels = Vec::new();
+    info!("📊 Loaded {} samples for LSTM training", loaded.timesteps.len());
 
-    for sample in samples {
-        if let Some(f) = sample["features"].as_array() {
-            let feature_vec: Vec<f64> = f.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect();
-            features.push(feature_vec);
-        }
-        labels.push(sample["label"].as_f64().unwrap_or(0.0));
-    }
-
-    info!("📊 Loaded {} samples for LSTM training", features.len());
-
-    let anomaly_count = labels.iter().filter(|&&l| l > 0.5).count();
+    let anomaly_count = loaded.labels.iter().filter(|&&l| l > 0.5).count();
     let model_path = state.ml_config.model_path.to_string_lossy().into_owned();
     let started = std::time::Instant::now();
-    let result = state.realtime_lstm.train_from_data(&features, &labels).await;
+    let result = state
+        .realtime_lstm
+        .train_from_data(&loaded.timesteps, &loaded.labels)
+        .await;
     let run = record_training_run(
         &state.training_history,
         TrainingSource::TrainReal,
         &result,
-        features.len(),
+        loaded.timesteps.len(),
         anomaly_count,
         &model_path,
         started,
     );
+    record_training_metrics(
+        &state.data_collector,
+        &state.training_metrics,
+        &result,
+        loaded.timesteps.len(),
+        anomaly_count,
+    )
+    .await;
 
     Json(json!({
         "status": if result.model_saved { "training_completed" } else { "training_failed" },
-        "samples_used": features.len(),
+        "samples_used": loaded.timesteps.len(),
         "anomalies": anomaly_count,
-        "normal": labels.len() - anomaly_count,
+        "normal": loaded.labels.len() - anomaly_count,
         "accuracy": result.accuracy,
         "f1_score": result.f1_score,
         "loss": result.loss,

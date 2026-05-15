@@ -19,6 +19,8 @@ pub struct TrainingMetrics {
     pub f1_score: f64,
     pub false_positive_rate: f64,
     pub false_negative_rate: f64,
+    #[serde(default)]
+    pub label_sources: Option<serde_json::Value>,
 }
 
 pub struct TrainingMetricsCollector {
@@ -97,6 +99,7 @@ impl TrainingMetricsCollector {
             f1_score: f1,
             false_positive_rate: if fp + tn > 0 { fp as f64 / (fp + tn) as f64 } else { 0.0 },
             false_negative_rate: if false_neg + tp > 0 { false_neg as f64 / (false_neg + tp) as f64 } else { 0.0 },
+            label_sources: None,
         }
     }
 
@@ -122,6 +125,7 @@ impl TrainingMetricsCollector {
         serde_json::json!({
             "total_trainings": total_trainings,
             "latest": latest,
+            "latest_label_sources": latest.as_ref().and_then(|m| m.label_sources.clone()),
             "history": self.history.iter().map(|m| serde_json::json!({
                 "timestamp": m.timestamp,
                 "accuracy": m.validation_accuracy,

@@ -1,7 +1,8 @@
 // src/falco_integration.rs
 
 use crate::data_collector::DataCollector;
-use crate::time_window_detector::{RealtimeLSTM, TrainingResult};
+use crate::event_labeling::{label_event, SharedLabelStore};
+use crate::realtime_lstm::{RealtimeLSTM, TrainingResult};
 use crate::training_history::{TrainingHistoryStore, TrainingSource};
 use anyhow::Result;
 use axum::{
@@ -37,6 +38,7 @@ pub struct FalcoEventHandler {
     window_size: usize,
     training_history: Arc<Mutex<TrainingHistoryStore>>,
     model_path: String,
+    label_store: SharedLabelStore,
 }
 
 impl FalcoEventHandler {
@@ -49,6 +51,7 @@ impl FalcoEventHandler {
         window_size: usize,
         training_history: Arc<Mutex<TrainingHistoryStore>>,
         model_path: String,
+        label_store: SharedLabelStore,
     ) -> Self {
         Self {
             event_sender,
@@ -60,6 +63,7 @@ impl FalcoEventHandler {
             window_size,
             training_history,
             model_path,
+            label_store,
         }
     }
 
@@ -83,8 +87,12 @@ impl FalcoEventHandler {
             return;
         }
 
-        let label = event_label(event);
-        self.data_collector.add_event(event.clone(), label).await;
+        let store = self.label_store.read().await;
+        let labeled = label_event(event, &store);
+        drop(store);
+        self.data_collector
+            .add_event_labeled(event.clone(), labeled.label, Some(labeled.source))
+            .await;
 
         if self.should_auto_train().await {
             self.train_from_collected_data().await;
@@ -149,6 +157,9 @@ impl FalcoEventHandler {
             self.data_collector
                 .retain_tail(self.window_size * 2)
                 .await;
+            if let Err(e) = self.data_collector.save_to_json().await {
+                warn!("Failed to persist collector after auto-train: {e:#}");
+            }
         }
 
         info!(
@@ -177,6 +188,7 @@ impl FalcoEventHandler {
         let buffer_len = self.data_collector.get_buffer_len().await;
         let anomalies = self.data_collector.anomaly_count().await;
         let training_summary = self.training_history.lock().unwrap().summary();
+        let label_sources = self.data_collector.label_stats_snapshot().await;
 
         serde_json::json!({
             "enabled": self.ml_config.enabled,
@@ -186,22 +198,13 @@ impl FalcoEventHandler {
             "auto_train_samples": self.ml_config.auto_train_samples,
             "min_train_samples": self.ml_config.min_train_samples,
             "training_in_progress": self.training.load(Ordering::Relaxed),
+            "label_sources": label_sources.to_json(),
             "lstm": lstm_stats,
             "training_history": training_summary,
         })
     }
 }
 
-fn event_label(event: &FalcoEvent) -> f64 {
-    if matches!(
-        event.priority.as_str(),
-        "Critical" | "Alert" | "Emergency" | "Error"
-    ) {
-        1.0
-    } else {
-        0.0
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FalcoEvent {
@@ -267,39 +270,7 @@ impl FalcoEvent {
 }
 
 pub fn falco_event_to_lstm_timestep(event: &FalcoEvent) -> Vec<f64> {
-    let mut features = vec![0.0; 8];
-
-    features[0] = match event.priority.as_str() {
-        "Emergency" => 5.0,
-        "Alert" => 4.0,
-        "Critical" => 4.0,
-        "Error" => 3.0,
-        "Warning" => 2.0,
-        "Informational" => 1.0,
-        _ => 1.0,
-    };
-
-    features[1] = if event.container_id.is_some() { 1.0 } else { 0.0 };
-    features[2] = if event.process_pid.is_some() { 1.0 } else { 0.0 };
-
-    features[3] = match event.syscall.as_deref() {
-        Some("execve") => 1.0,
-        Some("fork") => 0.8,
-        Some("clone") => 0.7,
-        Some("connect") => 0.6,
-        Some("socket") => 0.5,
-        Some("open") => 0.3,
-        Some("read") => 0.2,
-        Some("write") => 0.2,
-        _ => 0.0,
-    };
-
-    features[4] = (event.output.len() as f64 / 200.0).min(1.0);
-    features[5] = if event.tags.is_some() { 1.0 } else { 0.0 };
-    features[6] = if event.source.is_some() { 1.0 } else { 0.0 };
-    features[7] = if event.output_fields.is_some() { 1.0 } else { 0.0 };
-
-    features
+    crate::falco_timestep::falco_event_to_lstm_timestep(event)
 }
 
 pub async fn handle_falco_event_with_ml(
@@ -345,6 +316,7 @@ impl FalcoIntegration {
         webhook_bind: String,
         window_size: usize,
         model_path: String,
+        label_store: SharedLabelStore,
     ) -> Result<Self> {
         let (event_sender, mut event_receiver) = unbounded_channel::<FalcoEvent>();
         let response_clone = response_engine.clone();
@@ -372,6 +344,7 @@ impl FalcoIntegration {
             window_size,
             training_history,
             model_path,
+            label_store,
         ));
 
         ml_handler.init().await?;

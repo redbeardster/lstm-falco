@@ -43,7 +43,7 @@ pub struct EbpfSeccompManager {
     // _bpf: Option<Bpf>,  // Закомментировано, т.к. aya не подключена
     event_sender: UnboundedSender<EbpfSeccompEvent>,
     stats: Arc<RwLock<HashMap<u32, SyscallStats>>>,
-    anomaly_detector: Arc<AnomalyDetector>,
+    zscore_detector: Arc<crate::ebpf_zscore_detector::SyscallDurationZScoreDetector>,
 }
 
 impl EbpfSeccompManager {
@@ -51,22 +51,22 @@ impl EbpfSeccompManager {
         let (event_sender, event_receiver) = unbounded_channel();
 
         let stats = Arc::new(RwLock::new(HashMap::new()));
-        let anomaly_detector = Arc::new(AnomalyDetector::new());
+        let zscore_detector =
+            Arc::new(crate::ebpf_zscore_detector::SyscallDurationZScoreDetector::new());
 
         let manager = Self {
             event_sender: event_sender.clone(),
             stats: stats.clone(),
-            anomaly_detector: anomaly_detector.clone(),
+            zscore_detector: zscore_detector.clone(),
         };
 
         // Загружаем eBPF программу
         Self::load_ebpf_program().await?;
 
         // Запускаем обработчик событий
-        Self::start_event_handler(event_receiver, stats.clone(), anomaly_detector.clone());
+        Self::start_event_handler(event_receiver, stats.clone(), zscore_detector.clone());
 
-        // Запускаем анализатор аномалий
-        Self::start_anomaly_analyzer(stats.clone(), anomaly_detector.clone());
+        Self::start_anomaly_analyzer(stats.clone(), zscore_detector.clone());
 
         Ok(manager)
     }
@@ -99,9 +99,8 @@ impl EbpfSeccompManager {
     fn start_event_handler(
         mut receiver: UnboundedReceiver<EbpfSeccompEvent>,
         stats: Arc<RwLock<HashMap<u32, SyscallStats>>>,
-        anomaly_detector: Arc<AnomalyDetector>,
+        zscore_detector: Arc<crate::ebpf_zscore_detector::SyscallDurationZScoreDetector>,
     ) {
-
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 // Обновляем статистику
@@ -126,7 +125,10 @@ impl EbpfSeccompManager {
                 }
 
                 // Проверка на аномалии
-                if anomaly_detector.is_anomaly(&event).await {
+                if zscore_detector
+                    .is_anomaly(event.syscall_nr, event.duration_ns)
+                    .await
+                {
                     warn!(
                         "🚨 Аномалия обнаружена! PID: {}, Syscall: {}, Duration: {}ns",
                         event.pid, event.syscall_nr, event.duration_ns
@@ -146,9 +148,8 @@ impl EbpfSeccompManager {
 
     fn start_anomaly_analyzer(
         stats: Arc<RwLock<HashMap<u32, SyscallStats>>>,
-        _anomaly_detector: Arc<AnomalyDetector>,
+        _zscore_detector: Arc<crate::ebpf_zscore_detector::SyscallDurationZScoreDetector>,
     ) {
-
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
             loop {
@@ -192,89 +193,5 @@ impl EbpfSeccompManager {
         counts.sort_by(|a, b| b.1.cmp(&a.1));
         counts.truncate(limit);
         counts
-    }
-}
-
-// Детектор аномалий на основе машинного обучения
-pub struct AnomalyDetector {
-    baseline: Arc<RwLock<HashMap<u32, BaselineStats>>>,
-    thresholds: Arc<ThresholdConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BaselineStats {
-    mean_duration: f64,
-    std_dev: f64,
-    mean_frequency: f64,
-    sample_count: u64,
-}
-
-pub struct ThresholdConfig {
-    pub duration_multiplier: f64,  // 3 sigma by default
-    pub frequency_threshold: f64,
-    pub error_rate_threshold: f64,
-}
-
-impl Default for ThresholdConfig {
-    fn default() -> Self {
-        Self {
-            duration_multiplier: 3.0,
-            frequency_threshold: 1000.0,
-            error_rate_threshold: 0.5,
-        }
-    }
-}
-
-impl AnomalyDetector {
-    pub fn new() -> Self {
-        Self {
-            baseline: Arc::new(RwLock::new(HashMap::new())),
-            thresholds: Arc::new(ThresholdConfig::default()),
-        }
-    }
-
-    pub async fn is_anomaly(&self, event: &EbpfSeccompEvent) -> bool {
-        let mut baseline = self.baseline.write().await;
-        let stats = baseline.entry(event.syscall_nr).or_insert(BaselineStats {
-            mean_duration: event.duration_ns as f64,
-            std_dev: 0.0,
-            mean_frequency: 0.0,
-            sample_count: 1,
-        });
-
-        // Обновляем baseline с экспоненциальным сглаживанием
-        let alpha = 0.1;
-        stats.mean_duration = alpha * event.duration_ns as f64 + (1.0 - alpha) * stats.mean_duration;
-        stats.sample_count += 1;
-
-        // Проверка аномалий по длительности
-        if stats.std_dev > 0.0 {
-            let z_score = (event.duration_ns as f64 - stats.mean_duration).abs() / stats.std_dev;
-            if z_score > self.thresholds.duration_multiplier {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    pub async fn update_baseline(&self, syscall: u32, duration: u64) {
-        let mut baseline = self.baseline.write().await;
-        let stats = baseline.entry(syscall).or_insert(BaselineStats {
-            mean_duration: duration as f64,
-            std_dev: 0.0,
-            mean_frequency: 0.0,
-            sample_count: 1,
-        });
-
-        // Обновляем стандартное отклонение
-        let old_mean = stats.mean_duration;
-        stats.mean_duration = (stats.mean_duration * stats.sample_count as f64 + duration as f64)
-            / (stats.sample_count + 1) as f64;
-
-        let variance = (stats.std_dev * stats.std_dev) * stats.sample_count as f64
-            + (duration as f64 - old_mean) * (duration as f64 - stats.mean_duration);
-        stats.std_dev = (variance / (stats.sample_count + 1) as f64).sqrt();
-        stats.sample_count += 1;
     }
 }

@@ -71,8 +71,8 @@ name = "generate_training_data"
 path = "examples/generate_training_data.rs"
 
 [[example]]
-name = "train_lstm"
-path = "examples/train_lstm.rs"
+name = "train_simple_classifier"
+path = "examples/train_simple_classifier.rs"
 
 [[example]]
 name = "event_generator"

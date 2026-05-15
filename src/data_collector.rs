@@ -1,19 +1,28 @@
 // src/data_collector.rs
 
+use crate::event_labeling::LabelSourceStats;
 use crate::falco_integration::{falco_event_to_lstm_timestep, FalcoEvent};
 use crate::training_metrics::TrainingMetrics;
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct DataCollector {
     buffer: Arc<Mutex<Vec<FalcoEvent>>>,
     labels: Arc<Mutex<Vec<f64>>>,
+    label_stats: Arc<Mutex<LabelSourceStats>>,
     output_path: String,
     max_samples: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct CollectorEntry {
+    event: FalcoEvent,
+    label: f64,
 }
 
 impl DataCollector {
@@ -21,9 +30,18 @@ impl DataCollector {
         Self {
             buffer: Arc::new(Mutex::new(Vec::new())),
             labels: Arc::new(Mutex::new(Vec::new())),
+            label_stats: Arc::new(Mutex::new(LabelSourceStats::default())),
             output_path: output_path.to_string(),
             max_samples,
         }
+    }
+
+    pub fn label_stats_handle(&self) -> Arc<Mutex<LabelSourceStats>> {
+        self.label_stats.clone()
+    }
+
+    pub async fn label_stats_snapshot(&self) -> LabelSourceStats {
+        self.label_stats.lock().await.clone()
     }
 
     pub async fn get_buffer_len(&self) -> usize {
@@ -97,10 +115,24 @@ impl DataCollector {
             } else {
                 0.0
             },
+            label_sources: None,
         }
     }
 
     pub async fn add_event(&self, event: FalcoEvent, label: f64) {
+        self.add_event_labeled(event, label, None).await;
+    }
+
+    pub async fn add_event_labeled(
+        &self,
+        event: FalcoEvent,
+        label: f64,
+        source: Option<crate::event_labeling::LabelSource>,
+    ) {
+        if let Some(src) = source {
+            self.label_stats.lock().await.record(src, label);
+        }
+
         let mut buffer = self.buffer.lock().await;
         let mut labels = self.labels.lock().await;
 
@@ -175,5 +207,41 @@ impl DataCollector {
         buffer.drain(0..drop);
         labels.drain(0..drop);
         info!("Collector trimmed to last {} samples", keep);
+    }
+
+    /// Restore in-memory buffer from `ML_COLLECTOR_PATH` export (`{event, label}`).
+    pub async fn load_from_json(&self) -> Result<usize> {
+        let path = Path::new(&self.output_path);
+        if !path.exists() {
+            return Ok(0);
+        }
+        let content = fs::read_to_string(path).context("read collector JSON")?;
+        let entries: Vec<CollectorEntry> =
+            serde_json::from_str(&content).context("parse collector JSON")?;
+
+        let mut buffer = self.buffer.lock().await;
+        let mut labels = self.labels.lock().await;
+        buffer.clear();
+        labels.clear();
+
+        for entry in entries {
+            buffer.push(entry.event);
+            labels.push(entry.label.clamp(0.0, 1.0));
+        }
+
+        while buffer.len() > self.max_samples {
+            buffer.remove(0);
+            labels.remove(0);
+        }
+
+        let n = buffer.len();
+        info!("Collector restored {} samples from {:?}", n, path);
+        Ok(n)
+    }
+
+    pub async fn try_load_from_json(&self) {
+        if let Err(e) = self.load_from_json().await {
+            warn!("Collector restore skipped: {e:#}");
+        }
     }
 }
