@@ -1,7 +1,7 @@
 //! Backpropagation Through Time для LSTM-ячейки + сигмоидного классификатора.
 
-use crate::lstm_cell::LSTMCell;
-use crate::lstm_online::{predict_hidden, LSTMClassifierState};
+use crate::ml::lstm_cell::LSTMCell;
+use crate::ml::lstm_online::{predict_hidden, LSTMClassifierState};
 use ndarray::{Array1, Array2, Axis};
 
 /// Кэш одного шага forward (для backward).
@@ -297,7 +297,7 @@ pub fn train_sequence_bptt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lstm_cell::LSTMCell;
+    use crate::ml::lstm_cell::LSTMCell;
 
     fn make_sequence(n: usize, label_high: bool) -> (Vec<Vec<f64>>, f64) {
         let mut seq = Vec::with_capacity(n);

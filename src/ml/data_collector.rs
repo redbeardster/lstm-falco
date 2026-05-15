@@ -1,8 +1,8 @@
 // src/data_collector.rs
 
-use crate::event_labeling::LabelSourceStats;
+use crate::ml::event_labeling::LabelSourceStats;
 use crate::falco_integration::{falco_event_to_lstm_timestep, FalcoEvent};
-use crate::training_metrics::TrainingMetrics;
+use crate::ml::training_metrics::TrainingMetrics;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
@@ -127,7 +127,7 @@ impl DataCollector {
         &self,
         event: FalcoEvent,
         label: f64,
-        source: Option<crate::event_labeling::LabelSource>,
+        source: Option<crate::ml::event_labeling::LabelSource>,
     ) {
         if let Some(src) = source {
             self.label_stats.lock().await.record(src, label);

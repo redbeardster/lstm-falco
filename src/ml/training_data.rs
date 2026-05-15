@@ -1,6 +1,6 @@
 //! Load unified training datasets for LSTM (`training_data.json`).
 
-use crate::falco_timestep::LSTM_TIMESTEP_SIZE;
+use crate::ml::falco_timestep::LSTM_TIMESTEP_SIZE;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::fs;

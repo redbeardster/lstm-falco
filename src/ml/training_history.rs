@@ -1,6 +1,6 @@
 //! История запусков обучения LSTM (in-memory + JSON на диске).
 
-use crate::realtime_lstm::TrainingResult;
+use crate::ml::realtime_lstm::TrainingResult;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;

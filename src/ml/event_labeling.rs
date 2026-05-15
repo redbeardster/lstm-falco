@@ -62,10 +62,10 @@ pub struct LabelStore {
     path: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
-struct ManualLabelEntry {
-    rule: String,
-    label: f64,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ManualLabelEntry {
+    pub rule: String,
+    pub label: f64,
 }
 
 impl LabelStore {
@@ -116,8 +116,38 @@ impl LabelStore {
         }
     }
 
-    fn manual_label(&self, rule: &str) -> Option<f64> {
+    pub fn manual_label(&self, rule: &str) -> Option<f64> {
         self.by_rule.get(&rule.to_lowercase()).copied()
+    }
+
+    pub fn upsert_rule(&mut self, rule: &str, label: f64) {
+        self.by_rule
+            .insert(rule.to_lowercase(), label.clamp(0.0, 1.0));
+    }
+
+    pub fn list_rules(&self) -> Vec<ManualLabelEntry> {
+        let mut entries: Vec<_> = self
+            .by_rule
+            .iter()
+            .map(|(rule, &label)| ManualLabelEntry {
+                rule: rule.clone(),
+                label,
+            })
+            .collect();
+        entries.sort_by(|a, b| a.rule.cmp(&b.rule));
+        entries
+    }
+
+    pub fn persist(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let entries = self.list_rules();
+        let json = serde_json::to_string_pretty(&entries)?;
+        fs::write(&self.path, json)?;
+        Ok(())
     }
 }
 

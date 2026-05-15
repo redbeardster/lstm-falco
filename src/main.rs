@@ -1,26 +1,14 @@
 use crate::seccomp_manager::{DynamicSeccompManager, SecurityLevel as SeccompSecurityLevel};
 use axum::extract::Path;
 use crate::falco_integration::FalcoRule;
-use crate::training_metrics::TrainingMetricsCollector;
+use crate::ml::training_metrics::TrainingMetricsCollector;
 use falco_integration::FalcoIntegration;
 
 use std::sync::Mutex;
 
-mod data_collector;
-mod ml_config;
-mod ml_eval;
+mod ml;
 mod seccomp_manager;
-mod lstm_cell;
-mod lstm_bptt;
-mod lstm_online;
-mod sequence_features;
-mod training_metrics;
-mod training_history;
 mod ebpf_zscore_detector;
-mod event_labeling;
-mod falco_timestep;
-mod realtime_lstm;
-mod training_data;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -64,11 +52,11 @@ use detectors::{
     guardd_detector::GuarddDetector,
     heuristic_threat_detector::HeuristicThreatDetector,
 };
-use event_labeling::shared_label_store;
-use ml_config::MlConfig;
-use realtime_lstm::RealtimeLSTM;
-use training_data::load_training_data_file;
-use training_history::{TrainingHistoryStore, TrainingSource};
+use ml::event_labeling::{shared_label_store, ManualLabelEntry, SharedLabelStore};
+use ml::ml_config::MlConfig;
+use ml::realtime_lstm::RealtimeLSTM;
+use ml::training_data::load_training_data_file;
+use ml::training_history::{TrainingHistoryStore, TrainingSource};
 
 #[derive(Debug, Deserialize)]
 struct CreateRuleRequest {
@@ -150,21 +138,22 @@ struct AppState {
     seccomp_mgr: Arc<DynamicSeccompManager>,
     falco_manager: Arc<FalcoIntegration>,
     realtime_lstm: Arc<RealtimeLSTM>,
-    data_collector: Arc<data_collector::DataCollector>,
+    data_collector: Arc<ml::data_collector::DataCollector>,
     training_metrics: Arc<Mutex<TrainingMetricsCollector>>,
     training_history: Arc<Mutex<TrainingHistoryStore>>,
     ml_config: MlConfig,
+    label_store: SharedLabelStore,
 }
 
 fn record_training_run(
     history: &Arc<Mutex<TrainingHistoryStore>>,
     source: TrainingSource,
-    result: &realtime_lstm::TrainingResult,
+    result: &ml::realtime_lstm::TrainingResult,
     step_samples: usize,
     anomaly_labels: usize,
     model_path: &str,
     started: std::time::Instant,
-) -> training_history::TrainingRunRecord {
+) -> ml::training_history::TrainingRunRecord {
     history.lock().unwrap().record(
         source,
         result,
@@ -235,13 +224,13 @@ async fn bootstrap_train_from_file(
 }
 
 async fn record_training_metrics(
-    collector: &Arc<data_collector::DataCollector>,
+    collector: &Arc<ml::data_collector::DataCollector>,
     metrics_store: &Arc<Mutex<TrainingMetricsCollector>>,
-    result: &realtime_lstm::TrainingResult,
+    result: &ml::realtime_lstm::TrainingResult,
     step_samples: usize,
     anomaly_labels: usize,
 ) {
-    use crate::training_metrics::TrainingMetrics;
+    use crate::ml::training_metrics::TrainingMetrics;
 
     let stats = collector.label_stats_snapshot().await;
     let metrics = TrainingMetrics {
@@ -344,7 +333,7 @@ async fn main() -> Result<()> {
     let lstm_config = ml_config.to_lstm_config();
     let realtime_lstm = Arc::new(RealtimeLSTM::new(lstm_config).await);
 
-    let data_collector = Arc::new(data_collector::DataCollector::new(
+    let data_collector = Arc::new(ml::data_collector::DataCollector::new(
         &ml_config.collector_path.to_string_lossy(),
         ml_config.max_collector_samples,
     ));
@@ -375,7 +364,7 @@ async fn main() -> Result<()> {
             ml_config.falco_webhook_bind.clone(),
             ml_config.window_size,
             model_path,
-            label_store,
+            label_store.clone(),
         )
         .await?,
     );
@@ -427,6 +416,7 @@ async fn main() -> Result<()> {
         training_metrics: training_metrics.clone(),
         training_history: training_history.clone(),
         ml_config: ml_config.clone(),
+        label_store: label_store.clone(),
     };
 
     let api_bind = ml_config.api_bind.clone();
@@ -461,6 +451,8 @@ async fn main() -> Result<()> {
         .route("/api/ml/test", post(test_model))
         .route("/api/ml/train_real", post(train_on_real_data))
         .route("/api/ml/test_direct", get(test_model_direct))
+        .route("/api/ml/labels", get(list_manual_labels).post(set_manual_label))
+        .route("/api/ml/labels/reload", post(reload_manual_labels))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&api_bind)
@@ -973,6 +965,55 @@ async fn train_on_real_data(State(state): State<AppState>) -> Json<serde_json::V
         "model_saved": result.model_saved,
         "epochs_run": result.epochs_run,
         "training_run": run,
+    }))
+}
+
+async fn list_manual_labels(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let store = state.label_store.read().await;
+    let labels = store.list_rules();
+    let path = state.ml_config.labels_path.to_string_lossy().into_owned();
+    Json(json!({
+        "path": path,
+        "labels": labels,
+        "collector_label_sources": state.data_collector.label_stats_snapshot().await.to_json(),
+    }))
+}
+
+async fn set_manual_label(
+    State(state): State<AppState>,
+    Json(entry): Json<ManualLabelEntry>,
+) -> Json<serde_json::Value> {
+    if entry.rule.trim().is_empty() {
+        return Json(json!({
+            "status": "error",
+            "message": "rule must not be empty"
+        }));
+    }
+    let label = entry.label.clamp(0.0, 1.0);
+    let mut store = state.label_store.write().await;
+    store.upsert_rule(&entry.rule, label);
+    match store.persist() {
+        Ok(()) => Json(json!({
+            "status": "ok",
+            "rule": entry.rule,
+            "label": label,
+            "path": state.ml_config.labels_path,
+        })),
+        Err(e) => Json(json!({
+            "status": "error",
+            "message": e.to_string()
+        })),
+    }
+}
+
+async fn reload_manual_labels(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let mut store = state.label_store.write().await;
+    store.reload();
+    let count = store.list_rules().len();
+    Json(json!({
+        "status": "ok",
+        "rules_loaded": count,
+        "path": state.ml_config.labels_path,
     }))
 }
 

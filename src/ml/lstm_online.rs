@@ -1,7 +1,7 @@
 // src/lstm_online.rs — онлайн LSTM-детектор с полной персистентностью.
 
-use crate::lstm_bptt::train_sequence_bptt;
-use crate::lstm_cell::{LSTMCell, LSTMCellState};
+use crate::ml::lstm_bptt::train_sequence_bptt;
+use crate::ml::lstm_cell::{LSTMCell, LSTMCellState};
 use anyhow::{Context, Result};
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};

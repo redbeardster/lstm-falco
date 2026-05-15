@@ -1,6 +1,6 @@
 use crate::falco_integration::{falco_event_to_lstm_timestep, FalcoEvent};
-use crate::lstm_online::{LSTMOnlineDetector, LSTM_INPUT_SIZE};
-use crate::ml_eval::binary_metrics;
+use crate::ml::lstm_online::{LSTMOnlineDetector, LSTM_INPUT_SIZE};
+use crate::ml::ml_eval::binary_metrics;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -171,7 +171,7 @@ impl RealtimeLSTM {
             "model_trained": trained,
             "training_samples": self.detector.training_samples().await,
             "model_type": "LSTM",
-            "model_version": crate::lstm_online::MODEL_VERSION,
+            "model_version": crate::ml::lstm_online::MODEL_VERSION,
             "bptt_enabled": true,
             "grad_clip": self.config.grad_clip,
         })

@@ -100,8 +100,8 @@ impl MlConfig {
         Ok(())
     }
 
-    pub fn to_lstm_config(&self) -> crate::realtime_lstm::RealtimeLSTMConfig {
-        crate::realtime_lstm::RealtimeLSTMConfig {
+    pub fn to_lstm_config(&self) -> crate::ml::realtime_lstm::RealtimeLSTMConfig {
+        crate::ml::realtime_lstm::RealtimeLSTMConfig {
             window_size: self.window_size,
             step_size: self.step_size,
             threshold: self.anomaly_threshold,

@@ -1,9 +1,9 @@
 // src/falco_integration.rs
 
-use crate::data_collector::DataCollector;
-use crate::event_labeling::{label_event, SharedLabelStore};
-use crate::realtime_lstm::{RealtimeLSTM, TrainingResult};
-use crate::training_history::{TrainingHistoryStore, TrainingSource};
+use crate::ml::data_collector::DataCollector;
+use crate::ml::event_labeling::{label_event, SharedLabelStore};
+use crate::ml::realtime_lstm::{RealtimeLSTM, TrainingResult};
+use crate::ml::training_history::{TrainingHistoryStore, TrainingSource};
 use anyhow::Result;
 use axum::{
     http::StatusCode,
@@ -270,7 +270,7 @@ impl FalcoEvent {
 }
 
 pub fn falco_event_to_lstm_timestep(event: &FalcoEvent) -> Vec<f64> {
-    crate::falco_timestep::falco_event_to_lstm_timestep(event)
+    crate::ml::falco_timestep::falco_event_to_lstm_timestep(event)
 }
 
 pub async fn handle_falco_event_with_ml(

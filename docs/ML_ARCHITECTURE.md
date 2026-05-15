@@ -6,14 +6,14 @@ This stack uses **three independent detection paths**. Only the Falco webhook pa
 
 | Path | Module | Algorithm | Trigger |
 |------|--------|-----------|---------|
-| Falco webhook | `realtime_lstm`, `lstm_online`, `lstm_cell`, `lstm_bptt` | Online LSTM + sigmoid head | `POST /falco-events` |
-| eBPF syscalls | `ebpf_zscore_detector` | Per-syscall duration z-score | eBPF event stream |
+| Falco webhook | `ml/realtime_lstm`, `ml/lstm_online`, `ml/lstm_cell`, `ml/lstm_bptt` | Online LSTM + sigmoid head (single score; **no** z-score blend) | `POST /falco-events` |
+| eBPF syscalls | `ebpf_zscore_detector` | Per-syscall duration z-score (separate path) | eBPF event stream |
 | Composite API | `heuristic_threat_detector` | Weighted severity heuristic | `CompositeDetector` on `SecurityEvent` |
 
 ## Falco LSTM pipeline
 
 1. Webhook receives `FalcoEvent`.
-2. `event_labeling::label_event` assigns a proxy label (manual file → rule heuristic → priority).
+2. `ml::event_labeling::label_event` assigns a proxy label (**manual** → **rule heuristic** → **priority**). This replaces the old `if priority == "Critical" { 1.0 }` shortcut.
 3. `DataCollector` stores events; every `ML_AUTO_TRAIN_SAMPLES` (default 500) triggers auto-train.
 4. `RealtimeLSTM` scores each event; score above `ML_ANOMALY_THRESHOLD` triggers automated response.
 
@@ -42,12 +42,21 @@ Legacy `"features"` key in `training_data.json` is accepted if the vector length
 | GET | `/api/ml/lstm` | LSTM detector stats |
 | GET | `/api/ml/metrics` | Training metrics history |
 | POST | `/api/ml/save` | Flush collector to `ML_COLLECTOR_PATH` |
+| GET | `/api/ml/labels` | List manual rule labels + collector label-source stats |
+| POST | `/api/ml/labels` | Upsert `{ "rule", "label" }` into `ML_LABELS_PATH` |
+| POST | `/api/ml/labels/reload` | Reload `ML_LABELS_PATH` from disk |
 
 ## Environment variables
 
 - `ML_BOOTSTRAP_TRAIN=true` — on startup, train from `training_data.json` if model missing or `ML_FORCE_RETRAIN=true`.
 - `ML_FORCE_RETRAIN=true` — bootstrap overwrites existing `lstm_model.json`.
-- See `src/ml_config.rs` for window size, learning rate, thresholds, and paths.
+- See `src/ml/ml_config.rs` for window size, learning rate, thresholds, and paths.
+
+## Module layout
+
+All ML modules are under `src/ml/` (see `src/ml/mod.rs`). Integration with Falco/eBPF/API remains in `src/falco_integration.rs`, `src/ebpf_integration.rs`, and `src/main.rs`.
+
+Status summary: [PROJECT_STATUS.md](./PROJECT_STATUS.md).
 
 ## Labeling note
 
