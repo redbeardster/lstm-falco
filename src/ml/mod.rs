@@ -2,6 +2,7 @@
 
 pub mod data_collector;
 pub mod event_labeling;
+pub mod labeling_queue;
 pub mod falco_timestep;
 pub mod lstm_bptt;
 pub mod lstm_cell;

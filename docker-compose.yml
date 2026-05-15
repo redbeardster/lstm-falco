@@ -19,6 +19,12 @@ services:
       - ML_COLLECTOR_PATH=/data/lstm_training.json
       - ML_LABELS_PATH=/data/labels.json
       - ML_BOOTSTRAP_TRAIN=false
+      - ML_LABELING_QUEUE=true
+      - ML_ACTIVE_LEARNING=true
+      - ML_AL_LOW_CONFIDENCE=0.3
+      - ML_AL_HIGH_CONFIDENCE=0.9
+      - ML_LABELED_ANOMALIES_PATH=/data/labeled_anomalies.json
+      - ML_AUTO_RESPONSE_ON_ANOMALY=true
       - ML_MIN_TRAIN_SAMPLES=100
       - ML_AUTO_TRAIN_SAMPLES=500
       - ML_GRAD_CLIP=5.0

@@ -1,6 +1,6 @@
 use crate::seccomp_manager::{DynamicSeccompManager, SecurityLevel as SeccompSecurityLevel};
 use axum::extract::Path;
-use crate::falco_integration::FalcoRule;
+use crate::falco_integration::{FalcoEvent, FalcoRule};
 use crate::ml::training_metrics::TrainingMetricsCollector;
 use falco_integration::FalcoIntegration;
 
@@ -52,7 +52,8 @@ use detectors::{
     guardd_detector::GuarddDetector,
     heuristic_threat_detector::HeuristicThreatDetector,
 };
-use ml::event_labeling::{shared_label_store, ManualLabelEntry, SharedLabelStore};
+use ml::event_labeling::{shared_label_store, LabelSource, ManualLabelEntry, SharedLabelStore};
+use ml::labeling_queue::{shared_labeling_queue, SharedLabelingQueue};
 use ml::ml_config::MlConfig;
 use ml::realtime_lstm::RealtimeLSTM;
 use ml::training_data::load_training_data_file;
@@ -143,6 +144,7 @@ struct AppState {
     training_history: Arc<Mutex<TrainingHistoryStore>>,
     ml_config: MlConfig,
     label_store: SharedLabelStore,
+    labeling_queue: SharedLabelingQueue,
 }
 
 fn record_training_run(
@@ -340,6 +342,10 @@ async fn main() -> Result<()> {
     data_collector.try_load_from_json().await;
 
     let label_store = shared_label_store(ml_config.labels_path.clone());
+    let labeling_queue = shared_labeling_queue(
+        ml_config.labeled_anomalies_path.clone(),
+        ml_config.labeling_queue_max_pending,
+    );
 
     let model_path = ml_config.model_path.to_string_lossy().into_owned();
     if ml_config.bootstrap_train {
@@ -365,6 +371,7 @@ async fn main() -> Result<()> {
             ml_config.window_size,
             model_path,
             label_store.clone(),
+            labeling_queue.clone(),
         )
         .await?,
     );
@@ -417,6 +424,7 @@ async fn main() -> Result<()> {
         training_history: training_history.clone(),
         ml_config: ml_config.clone(),
         label_store: label_store.clone(),
+        labeling_queue: labeling_queue.clone(),
     };
 
     let api_bind = ml_config.api_bind.clone();
@@ -453,6 +461,10 @@ async fn main() -> Result<()> {
         .route("/api/ml/test_direct", get(test_model_direct))
         .route("/api/ml/labels", get(list_manual_labels).post(set_manual_label))
         .route("/api/ml/labels/reload", post(reload_manual_labels))
+        .route("/api/ml/pending", get(get_pending_anomalies))
+        .route("/api/ml/label", post(label_anomaly))
+        .route("/api/ml/labeled", get(list_labeled_anomalies))
+        .route("/api/ml/train_labeled", post(train_on_labeled_anomalies))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&api_bind)
@@ -964,6 +976,148 @@ async fn train_on_real_data(State(state): State<AppState>) -> Json<serde_json::V
         "loss": result.loss,
         "model_saved": result.model_saved,
         "epochs_run": result.epochs_run,
+        "training_run": run,
+    }))
+}
+
+async fn get_pending_anomalies(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let pending = state.labeling_queue.list_pending().await;
+    Json(json!({
+        "count": pending.len(),
+        "pending": pending,
+    }))
+}
+
+#[derive(Deserialize)]
+struct AnalystLabelRequest {
+    id: String,
+    is_real_attack: bool,
+}
+
+async fn label_anomaly(
+    State(state): State<AppState>,
+    Json(req): Json<AnalystLabelRequest>,
+) -> Json<serde_json::Value> {
+    match state
+        .labeling_queue
+        .submit_label(&req.id, req.is_real_attack)
+        .await
+    {
+        Ok(record) => {
+            state
+                .data_collector
+                .add_event_labeled(
+                    FalcoEvent {
+                        time: record.timestamp,
+                        rule: record.rule.clone(),
+                        priority: record.priority.clone(),
+                        output: format!(
+                            "analyst-labeled id={} predicted={:.3}",
+                            record.id, record.predicted_score
+                        ),
+                        source: Some("analyst".to_string()),
+                        tags: Some(vec!["analyst_labeled".to_string()]),
+                        output_fields: None,
+                        hostname: None,
+                        container_id: None,
+                        process_pid: None,
+                        syscall: None,
+                    },
+                    record.label,
+                    Some(LabelSource::Analyst),
+                )
+                .await;
+
+            Json(json!({
+                "status": "ok",
+                "message": "Anomaly labeled and saved for training",
+                "record": record,
+            }))
+        }
+        Err(e) => Json(json!({
+            "status": "error",
+            "message": e.to_string(),
+        })),
+    }
+}
+
+async fn list_labeled_anomalies(State(state): State<AppState>) -> Json<serde_json::Value> {
+    match state.labeling_queue.list_labeled().await {
+        Ok(records) => Json(json!({
+            "count": records.len(),
+            "path": state.ml_config.labeled_anomalies_path,
+            "labeled": records,
+        })),
+        Err(e) => Json(json!({
+            "status": "error",
+            "message": e.to_string(),
+        })),
+    }
+}
+
+async fn train_on_labeled_anomalies(State(state): State<AppState>) -> Json<serde_json::Value> {
+    use ml::labeling_queue::load_labeled_anomalies_training;
+
+    let loaded = match load_labeled_anomalies_training(&state.labeling_queue).await {
+        Ok(d) => d,
+        Err(e) => {
+            return Json(json!({
+                "status": "error",
+                "message": format!("Failed to load labeled anomalies: {e}")
+            }));
+        }
+    };
+
+    if loaded.timesteps.is_empty() {
+        return Json(json!({
+            "status": "error",
+            "message": "No analyst-labeled samples yet. Label items via POST /api/ml/label"
+        }));
+    }
+
+    if loaded.timesteps.len() < state.ml_config.min_train_samples {
+        return Json(json!({
+            "status": "error",
+            "message": format!(
+                "Need at least {} labeled samples, have {}",
+                state.ml_config.min_train_samples,
+                loaded.timesteps.len()
+            )
+        }));
+    }
+
+    let anomaly_count = loaded.labels.iter().filter(|&&l| l > 0.5).count();
+    let model_path = state.ml_config.model_path.to_string_lossy().into_owned();
+    let started = std::time::Instant::now();
+    let result = state
+        .realtime_lstm
+        .train_from_data(&loaded.timesteps, &loaded.labels)
+        .await;
+    let run = record_training_run(
+        &state.training_history,
+        TrainingSource::TrainReal,
+        &result,
+        loaded.timesteps.len(),
+        anomaly_count,
+        &model_path,
+        started,
+    );
+    record_training_metrics(
+        &state.data_collector,
+        &state.training_metrics,
+        &result,
+        loaded.timesteps.len(),
+        anomaly_count,
+    )
+    .await;
+
+    Json(json!({
+        "status": if result.model_saved { "training_completed" } else { "training_failed" },
+        "samples_used": loaded.timesteps.len(),
+        "anomalies": anomaly_count,
+        "accuracy": result.accuracy,
+        "f1_score": result.f1_score,
+        "model_saved": result.model_saved,
         "training_run": run,
     }))
 }

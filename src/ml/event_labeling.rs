@@ -15,6 +15,8 @@ pub enum LabelSource {
     Manual,
     Rule,
     Priority,
+    ActiveLearning,
+    Analyst,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -31,6 +33,10 @@ pub struct LabelSourceStats {
     pub rule_negative: usize,
     pub priority_positive: usize,
     pub priority_negative: usize,
+    pub active_learning_positive: usize,
+    pub active_learning_negative: usize,
+    pub analyst_positive: usize,
+    pub analyst_negative: usize,
 }
 
 impl LabelSourceStats {
@@ -43,6 +49,10 @@ impl LabelSourceStats {
             (LabelSource::Rule, false) => self.rule_negative += 1,
             (LabelSource::Priority, true) => self.priority_positive += 1,
             (LabelSource::Priority, false) => self.priority_negative += 1,
+            (LabelSource::ActiveLearning, true) => self.active_learning_positive += 1,
+            (LabelSource::ActiveLearning, false) => self.active_learning_negative += 1,
+            (LabelSource::Analyst, true) => self.analyst_positive += 1,
+            (LabelSource::Analyst, false) => self.analyst_negative += 1,
         }
     }
 
@@ -51,7 +61,9 @@ impl LabelSourceStats {
             "manual": { "positive": self.manual_positive, "negative": self.manual_negative },
             "rule": { "positive": self.rule_positive, "negative": self.rule_negative },
             "priority": { "positive": self.priority_positive, "negative": self.priority_negative },
-            "note": "priority labels are Falco severity proxies, not confirmed incidents"
+            "active_learning": { "positive": self.active_learning_positive, "negative": self.active_learning_negative },
+            "analyst": { "positive": self.analyst_positive, "negative": self.analyst_negative },
+            "note": "priority labels are Falco severity proxies; analyst labels are ground truth"
         })
     }
 }

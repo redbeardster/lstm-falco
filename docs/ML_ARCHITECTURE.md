@@ -45,6 +45,10 @@ Legacy `"features"` key in `training_data.json` is accepted if the vector length
 | GET | `/api/ml/labels` | List manual rule labels + collector label-source stats |
 | POST | `/api/ml/labels` | Upsert `{ "rule", "label" }` into `ML_LABELS_PATH` |
 | POST | `/api/ml/labels/reload` | Reload `ML_LABELS_PATH` from disk |
+| GET | `/api/ml/pending` | Analyst queue: uncertain / flagged events |
+| POST | `/api/ml/label` | Analyst confirms `{ "id", "is_real_attack" }` |
+| GET | `/api/ml/labeled` | List persisted analyst labels |
+| POST | `/api/ml/train_labeled` | Train from `ML_LABELED_ANOMALIES_PATH` |
 
 ## Environment variables
 
@@ -60,7 +64,14 @@ Status summary: [PROJECT_STATUS.md](./PROJECT_STATUS.md).
 
 ## Labeling note
 
-Training labels are **proxies**: priority and rule heuristics approximate anomalies. They are not confirmed incidents. Use `ML_LABELS_PATH` for manual ground truth on specific rules.
+Training labels use a **cascade** (see [LABELING_WORKFLOW.md](./LABELING_WORKFLOW.md)):
+
+1. Analyst (`analyst`) — ground truth from `POST /api/ml/label`
+2. Manual rules file (`manual`) — `ML_LABELS_PATH`
+3. Active learning (`active_learning`) — auto 0/1 when score ≤0.3 or ≥0.9
+4. Rule / priority heuristics — proxy only
+
+Uncertain scores (0.3–0.9) skip auto-training until an analyst labels them.
 
 ## Examples
 

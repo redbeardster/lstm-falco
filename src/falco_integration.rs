@@ -1,7 +1,10 @@
 // src/falco_integration.rs
 
 use crate::ml::data_collector::DataCollector;
-use crate::ml::event_labeling::{label_event, SharedLabelStore};
+use crate::ml::event_labeling::SharedLabelStore;
+use crate::ml::labeling_queue::{
+    resolve_training_label, ActiveLearningConfig, SharedLabelingQueue,
+};
 use crate::ml::realtime_lstm::{RealtimeLSTM, TrainingResult};
 use crate::ml::training_history::{TrainingHistoryStore, TrainingSource};
 use anyhow::Result;
@@ -26,6 +29,11 @@ pub struct FalcoMlConfig {
     pub anomaly_threshold: f64,
     pub auto_train_samples: usize,
     pub min_train_samples: usize,
+    pub labeling_queue_enabled: bool,
+    pub active_learning_enabled: bool,
+    pub active_learning_low: f64,
+    pub active_learning_high: f64,
+    pub auto_response_on_anomaly: bool,
 }
 
 pub struct FalcoEventHandler {
@@ -39,6 +47,7 @@ pub struct FalcoEventHandler {
     training_history: Arc<Mutex<TrainingHistoryStore>>,
     model_path: String,
     label_store: SharedLabelStore,
+    labeling_queue: SharedLabelingQueue,
 }
 
 impl FalcoEventHandler {
@@ -52,6 +61,7 @@ impl FalcoEventHandler {
         training_history: Arc<Mutex<TrainingHistoryStore>>,
         model_path: String,
         label_store: SharedLabelStore,
+        labeling_queue: SharedLabelingQueue,
     ) -> Self {
         Self {
             event_sender,
@@ -64,6 +74,7 @@ impl FalcoEventHandler {
             training_history,
             model_path,
             label_store,
+            labeling_queue,
         }
     }
 
@@ -87,27 +98,58 @@ impl FalcoEventHandler {
             return;
         }
 
+        let Some(score) = self.realtime_lstm.process_event(event.clone()).await else {
+            return;
+        };
+
         let store = self.label_store.read().await;
-        let labeled = label_event(event, &store);
+        let active_learning = ActiveLearningConfig {
+            enabled: self.ml_config.active_learning_enabled,
+            low_confidence: self.ml_config.active_learning_low,
+            high_confidence: self.ml_config.active_learning_high,
+        };
+        let decision = resolve_training_label(
+            score,
+            event,
+            &store,
+            &active_learning,
+            self.ml_config.labeling_queue_enabled,
+            self.ml_config.labeling_queue_enabled && !self.ml_config.active_learning_enabled,
+            self.ml_config.anomaly_threshold,
+        );
         drop(store);
-        self.data_collector
-            .add_event_labeled(event.clone(), labeled.label, Some(labeled.source))
-            .await;
+
+        if !decision.skip_collector {
+            self.data_collector
+                .add_event_labeled(event.clone(), decision.label, Some(decision.source))
+                .await;
+        }
+
+        if decision.enqueue_for_analyst {
+            let reason = if active_learning.enabled && score > self.ml_config.active_learning_low
+                && score < self.ml_config.active_learning_high
+            {
+                "uncertain_score"
+            } else {
+                "high_anomaly_score"
+            };
+            self.labeling_queue
+                .enqueue(event, score, reason)
+                .await;
+        }
 
         if self.should_auto_train().await {
             self.train_from_collected_data().await;
         }
 
-        let Some(score) = self.realtime_lstm.process_event(event.clone()).await else {
-            return;
-        };
-
         if score > self.ml_config.anomaly_threshold {
             warn!(
-                "🚨 LSTM ANOMALY! Score: {:.3}, Rule: {}, Priority: {}",
+                "LSTM anomaly score={:.3} rule={} priority={}",
                 score, event.rule, event.priority
             );
-            self.trigger(event.clone()).await;
+            if self.ml_config.auto_response_on_anomaly && !decision.enqueue_for_analyst {
+                self.trigger(event.clone()).await;
+            }
         }
     }
 
@@ -189,6 +231,7 @@ impl FalcoEventHandler {
         let anomalies = self.data_collector.anomaly_count().await;
         let training_summary = self.training_history.lock().unwrap().summary();
         let label_sources = self.data_collector.label_stats_snapshot().await;
+        let pending_labels = self.labeling_queue.pending_count().await;
 
         serde_json::json!({
             "enabled": self.ml_config.enabled,
@@ -199,6 +242,9 @@ impl FalcoEventHandler {
             "min_train_samples": self.ml_config.min_train_samples,
             "training_in_progress": self.training.load(Ordering::Relaxed),
             "label_sources": label_sources.to_json(),
+            "pending_analyst_labels": pending_labels,
+            "active_learning": self.ml_config.active_learning_enabled,
+            "labeling_queue": self.ml_config.labeling_queue_enabled,
             "lstm": lstm_stats,
             "training_history": training_summary,
         })
@@ -317,6 +363,7 @@ impl FalcoIntegration {
         window_size: usize,
         model_path: String,
         label_store: SharedLabelStore,
+        labeling_queue: SharedLabelingQueue,
     ) -> Result<Self> {
         let (event_sender, mut event_receiver) = unbounded_channel::<FalcoEvent>();
         let response_clone = response_engine.clone();
@@ -345,6 +392,7 @@ impl FalcoIntegration {
             training_history,
             model_path,
             label_store,
+            labeling_queue,
         ));
 
         ml_handler.init().await?;
